@@ -171,6 +171,44 @@ local function looksLikeTelemetryRatioField(name, values)
   return false
 end
 
+local function looksLikeTxPowerField(name, values)
+  local lname = string.lower(name or "")
+  if string.find(lname, "tx power", 1, true) or string.find(lname, "rf power", 1, true) or string.find(lname, "power", 1, true) then
+    return true
+  end
+  if type(values) == "table" then
+    for i = 1, #values do
+      local v = values[i]
+      if v then
+        local lv = string.lower(v)
+        if string.find(lv, "mw") or string.find(lv, "dbm") then
+          return true
+        end
+      end
+    end
+  end
+  return false
+end
+
+local function looksLikeLinkModeField(name, values)
+  local lname = string.lower(name or "")
+  if string.find(lname, "link mode", 1, true) or ((string.find(lname, "mode", 1, true) or string.find(lname, "compat", 1, true)) and not string.find(lname, "model", 1, true)) or string.find(lname, "hybrid", 1, true) then
+    return true
+  end
+  if type(values) == "table" then
+    for i = 1, #values do
+      local v = values[i]
+      if v then
+        local lv = string.lower(v)
+        if string.find(lv, "hybrid") or string.find(lv, "flrc") or string.find(lv, "lora") or string.find(lv, "f-mode") then
+          return true
+        end
+      end
+    end
+  end
+  return false
+end
+
 local core = {
   hasCrossfire = type(crossfireTelemetryPush) == "function" and type(crossfireTelemetryPop) == "function",
   deviceId = DEVICE_ID,
@@ -193,12 +231,30 @@ local core = {
   teleLabel = nil,
   teleValueIndex = nil,
   teleLastUpdate = 0,
+  powerFieldId = nil,
+  powerFieldName = nil,
+  powerOptions = nil,
+  powerUnit = "",
+  powerRaw = nil,
+  powerLabel = nil,
+  powerValueIndex = nil,
+  powerLastUpdate = 0,
+  modeFieldId = nil,
+  modeFieldName = nil,
+  modeOptions = nil,
+  modeUnit = "",
+  modeRaw = nil,
+  modeLabel = nil,
+  modeValueIndex = nil,
+  modeLastUpdate = 0,
   lastUpdate = 0,
   pending = nil,
   nextDevicePoll = 0,
   nextFieldRequest = 0,
   nextValueRequest = 0,
   nextTeleRequest = 0,
+  nextPowerRequest = 0,
+  nextModeRequest = 0,
   nextRescan = 0,
   requestTimeout = 200,
   scanSpacing = 15,
@@ -279,6 +335,24 @@ local function handleDeviceInfo(data)
       core.teleValueIndex = nil
       core.nextTeleRequest = 0
       core.teleLastUpdate = 0
+      core.powerFieldId = nil
+      core.powerFieldName = nil
+      core.powerOptions = nil
+      core.powerUnit = ""
+      core.powerRaw = nil
+      core.powerLabel = nil
+      core.powerValueIndex = nil
+      core.powerLastUpdate = 0
+      core.nextPowerRequest = 0
+      core.modeFieldId = nil
+      core.modeFieldName = nil
+      core.modeOptions = nil
+      core.modeUnit = ""
+      core.modeRaw = nil
+      core.modeLabel = nil
+      core.modeValueIndex = nil
+      core.modeLastUpdate = 0
+      core.nextModeRequest = 0
     end
   end
   if readUInt(frame, offset, 4) == 0x454C5253 then
@@ -300,6 +374,8 @@ local function handleFieldData(fieldData, offset, fieldId)
 
     local looksLikePacket = looksLikePacketRateField(name, values)
     local looksLikeTelem = looksLikeTelemetryRatioField(name, values)
+    local looksLikePower = looksLikeTxPowerField(name, values)
+    local looksLikeMode = looksLikeLinkModeField(name, values)
     if not core.targetFieldId and looksLikePacket then
       core.targetFieldId = fieldId
       core.targetFieldName = name
@@ -311,6 +387,18 @@ local function handleFieldData(fieldData, offset, fieldId)
       core.teleFieldName = name
       core.teleOptions = values
       core.teleUnit = unit
+    end
+    if not core.powerFieldId and looksLikePower then
+      core.powerFieldId = fieldId
+      core.powerFieldName = name
+      core.powerOptions = values
+      core.powerUnit = unit
+    end
+    if not core.modeFieldId and looksLikeMode then
+      core.modeFieldId = fieldId
+      core.modeFieldName = name
+      core.modeOptions = values
+      core.modeUnit = unit
     end
 
     if core.targetFieldId == fieldId and looksLikePacket then
@@ -330,6 +418,24 @@ local function handleFieldData(fieldData, offset, fieldId)
       core.teleRaw = teleRaw
       core.teleLabel = formatTelemLabel(teleRaw)
       core.teleLastUpdate = getTime()
+    end
+    if core.powerFieldId == fieldId and looksLikePower then
+      core.powerOptions = values
+      core.powerUnit = unit
+      core.powerValueIndex = valueIndex
+      local powerRaw = values[(valueIndex or 0) + 1] or "?"
+      core.powerRaw = powerRaw
+      core.powerLabel = formatPacketLabel(powerRaw)
+      core.powerLastUpdate = getTime()
+    end
+    if core.modeFieldId == fieldId and looksLikeMode then
+      core.modeOptions = values
+      core.modeUnit = unit
+      core.modeValueIndex = valueIndex
+      local modeRaw = values[(valueIndex or 0) + 1] or "?"
+      core.modeRaw = modeRaw
+      core.modeLabel = formatTelemLabel(modeRaw)
+      core.modeLastUpdate = getTime()
     end
   end
 end
@@ -407,19 +513,33 @@ local function scheduleRequests()
     return
   end
 
-  local needScan = (core.targetFieldId == nil) or (core.teleFieldId == nil)
+  local needScan = (core.targetFieldId == nil) or (core.teleFieldId == nil) or (core.powerFieldId == nil) or (core.modeFieldId == nil)
   local packetDue = core.targetFieldId and now >= (core.nextValueRequest or 0)
   local teleDue = core.teleFieldId and now >= (core.nextTeleRequest or 0)
+  local powerDue = core.powerFieldId and now >= (core.nextPowerRequest or 0)
+  local modeDue = core.modeFieldId and now >= (core.nextModeRequest or 0)
 
-  if packetDue and (not teleDue or (core.nextValueRequest or 0) <= (core.nextTeleRequest or 0)) then
+  if packetDue and (not teleDue or (core.nextValueRequest or 0) <= (core.nextTeleRequest or 0)) and (not powerDue or (core.nextValueRequest or 0) <= (core.nextPowerRequest or 0)) and (not modeDue or (core.nextValueRequest or 0) <= (core.nextModeRequest or 0)) then
     requestField(core.targetFieldId, 0)
     core.nextValueRequest = now + core.refreshInterval
     return
   end
 
-  if teleDue then
+  if teleDue and (not powerDue or (core.nextTeleRequest or 0) <= (core.nextPowerRequest or 0)) and (not modeDue or (core.nextTeleRequest or 0) <= (core.nextModeRequest or 0)) then
     requestField(core.teleFieldId, 0)
     core.nextTeleRequest = now + core.refreshInterval
+    return
+  end
+
+  if powerDue and (not modeDue or (core.nextPowerRequest or 0) <= (core.nextModeRequest or 0)) then
+    requestField(core.powerFieldId, 0)
+    core.nextPowerRequest = now + core.refreshInterval
+    return
+  end
+
+  if modeDue then
+    requestField(core.modeFieldId, 0)
+    core.nextModeRequest = now + core.refreshInterval
     return
   end
 
@@ -471,6 +591,18 @@ local function getPacketInfo()
   if core.teleFieldId and teleLabel then
     teleStale = (now - (core.teleLastUpdate or 0)) > core.staleAfter
   end
+  local powerLabelValue = core.powerLabel
+  local powerRaw = core.powerRaw
+  local powerStale
+  if core.powerFieldId and powerLabelValue then
+    powerStale = (now - (core.powerLastUpdate or 0)) > core.staleAfter
+  end
+  local modeLabelValue = core.modeLabel
+  local modeRaw = core.modeRaw
+  local modeStale
+  if core.modeFieldId and modeLabelValue then
+    modeStale = (now - (core.modeLastUpdate or 0)) > core.staleAfter
+  end
   return {
     state = stale and "stale" or "ready",
     label = core.targetLabel,
@@ -481,7 +613,15 @@ local function getPacketInfo()
     teleLabel = teleLabel,
     teleRaw = teleRaw,
     teleFieldName = core.teleFieldName,
-    teleStale = teleLabel and teleStale or nil
+    teleStale = teleLabel and teleStale or nil,
+    powerLabel = powerLabelValue,
+    powerRaw = powerRaw,
+    powerFieldName = core.powerFieldName,
+    powerStale = powerLabelValue and powerStale or nil,
+    modeLabel = modeLabelValue,
+    modeRaw = modeRaw,
+    modeFieldName = core.modeFieldName,
+    modeStale = modeLabelValue and modeStale or nil
   }
 end
 
@@ -542,6 +682,12 @@ local function updateOptions(widget, options)
   if widget.options.ShowTelem == nil then
     widget.options.ShowTelem = 1
   end
+  if widget.options.ShowPower == nil then
+    widget.options.ShowPower = 1
+  end
+  if widget.options.ShowMode == nil then
+    widget.options.ShowMode = 1
+  end
 end
 
 local function create(zone, options)
@@ -588,6 +734,26 @@ local function refresh(widget)
     end
     subParts[#subParts + 1] = "Telem " .. teleText
   end
+  if widget.options.ShowPower ~= 0 and info.powerLabel then
+    local powerText = info.powerLabel
+    if info.powerRaw and info.powerRaw ~= info.powerLabel then
+      powerText = powerText .. " (" .. info.powerRaw .. ")"
+    end
+    if info.powerStale then
+      powerText = powerText .. " *"
+    end
+    subParts[#subParts + 1] = "Power " .. powerText
+  end
+  if widget.options.ShowMode ~= 0 and info.modeLabel then
+    local modeText = info.modeLabel
+    if info.modeRaw and info.modeRaw ~= info.modeLabel then
+      modeText = modeText .. " (" .. info.modeRaw .. ")"
+    end
+    if info.modeStale then
+      modeText = modeText .. " *"
+    end
+    subParts[#subParts + 1] = "Mode " .. modeText
+  end
   if #subParts > 0 then
     local subline = table.concat(subParts, " | ")
     drawCentered(widget.zone, widget.zone.y + widget.zone.h - 10, subline, SMLSIZE)
@@ -598,7 +764,9 @@ return {
   name = "ELRS Packet Rate",
   options = {
     { "ShowName", BOOL, 1 },
-    { "ShowTelem", BOOL, 1 }
+    { "ShowTelem", BOOL, 1 },
+    { "ShowPower", BOOL, 1 },
+    { "ShowMode", BOOL, 1 }
   },
   create = create,
   update = update,
