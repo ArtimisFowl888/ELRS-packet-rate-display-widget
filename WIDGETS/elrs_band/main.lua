@@ -118,6 +118,18 @@ local function formatPacketLabel(raw)
   return label
 end
 
+local function formatTelemLabel(raw)
+  if not raw or raw == "" then
+    return "Unknown"
+  end
+  local label = string.gsub(raw, "%s+", " ")
+  label = string.gsub(label, "^%s+", "")
+  label = string.gsub(label, "%s+$", "")
+  label = string.gsub(label, "[Tt]elemetry", "Telem")
+  label = string.gsub(label, "[Rr]atio", "Ratio")
+  return label
+end
+
 local function looksLikePacketRateField(name, values)
   local lname = string.lower(name or "")
   if string.find(lname, "packet rate", 1, true) or string.find(lname, "pkt rate", 1, true) then
@@ -129,6 +141,28 @@ local function looksLikePacketRateField(name, values)
       if v then
         local lv = string.lower(v)
         if string.find(lv, "hz") or string.find(lv, "pkt") or string.find(lv, "packet") then
+          return true
+        end
+      end
+    end
+  end
+  return false
+end
+
+local function looksLikeTelemetryRatioField(name, values)
+  local lname = string.lower(name or "")
+  if string.find(lname, "telemetry ratio", 1, true) or string.find(lname, "telem ratio", 1, true) or string.find(lname, "telem", 1, true) then
+    return true
+  end
+  if type(values) == "table" then
+    for i = 1, #values do
+      local v = values[i]
+      if v then
+        local lv = string.lower(v)
+        if string.find(lv, "tele") or string.find(lv, "ratio") or string.find(lv, "std") or string.find(lv, "no tele") then
+          return true
+        end
+        if string.find(lv, "%d+:%d+") then
           return true
         end
       end
@@ -151,11 +185,20 @@ local core = {
   targetRaw = nil,
   targetLabel = nil,
   targetValueIndex = nil,
+  teleFieldId = nil,
+  teleFieldName = nil,
+  teleOptions = nil,
+  teleUnit = "",
+  teleRaw = nil,
+  teleLabel = nil,
+  teleValueIndex = nil,
+  teleLastUpdate = 0,
   lastUpdate = 0,
   pending = nil,
   nextDevicePoll = 0,
   nextFieldRequest = 0,
   nextValueRequest = 0,
+  nextTeleRequest = 0,
   nextRescan = 0,
   requestTimeout = 200,
   scanSpacing = 15,
@@ -227,6 +270,15 @@ local function handleDeviceInfo(data)
       core.targetUnit = ""
       core.targetValueIndex = nil
       core.nextValueRequest = 0
+      core.teleFieldId = nil
+      core.teleFieldName = nil
+      core.teleOptions = nil
+      core.teleUnit = ""
+      core.teleRaw = nil
+      core.teleLabel = nil
+      core.teleValueIndex = nil
+      core.nextTeleRequest = 0
+      core.teleLastUpdate = 0
     end
   end
   if readUInt(frame, offset, 4) == 0x454C5253 then
@@ -247,11 +299,18 @@ local function handleFieldData(fieldData, offset, fieldId)
     local unit, _ = readString(fieldData, nextOffset + 4)
 
     local looksLikePacket = looksLikePacketRateField(name, values)
+    local looksLikeTelem = looksLikeTelemetryRatioField(name, values)
     if not core.targetFieldId and looksLikePacket then
       core.targetFieldId = fieldId
       core.targetFieldName = name
       core.targetOptions = values
       core.targetUnit = unit
+    end
+    if not core.teleFieldId and looksLikeTelem then
+      core.teleFieldId = fieldId
+      core.teleFieldName = name
+      core.teleOptions = values
+      core.teleUnit = unit
     end
 
     if core.targetFieldId == fieldId and looksLikePacket then
@@ -262,6 +321,15 @@ local function handleFieldData(fieldData, offset, fieldId)
       core.targetRaw = raw
       core.targetLabel = formatPacketLabel(raw)
       core.lastUpdate = getTime()
+    end
+    if core.teleFieldId == fieldId and looksLikeTelem then
+      core.teleOptions = values
+      core.teleUnit = unit
+      core.teleValueIndex = valueIndex
+      local teleRaw = values[(valueIndex or 0) + 1] or "?"
+      core.teleRaw = teleRaw
+      core.teleLabel = formatTelemLabel(teleRaw)
+      core.teleLastUpdate = getTime()
     end
   end
 end
@@ -339,12 +407,23 @@ local function scheduleRequests()
     return
   end
 
-  if core.targetFieldId then
-    if now >= (core.nextValueRequest or 0) then
-      requestField(core.targetFieldId, 0)
-      core.nextValueRequest = now + core.refreshInterval
-    end
-  else
+  local needScan = (core.targetFieldId == nil) or (core.teleFieldId == nil)
+  local packetDue = core.targetFieldId and now >= (core.nextValueRequest or 0)
+  local teleDue = core.teleFieldId and now >= (core.nextTeleRequest or 0)
+
+  if packetDue and (not teleDue or (core.nextValueRequest or 0) <= (core.nextTeleRequest or 0)) then
+    requestField(core.targetFieldId, 0)
+    core.nextValueRequest = now + core.refreshInterval
+    return
+  end
+
+  if teleDue then
+    requestField(core.teleFieldId, 0)
+    core.nextTeleRequest = now + core.refreshInterval
+    return
+  end
+
+  if needScan then
     if core.searchIndex > core.fieldsCount then
       if now >= core.nextRescan then
         core.searchIndex = 1
@@ -383,15 +462,26 @@ local function getPacketInfo()
     return { state = "no_data", module = core.deviceName }
   end
 
-  local age = getTime() - (core.lastUpdate or 0)
+  local now = getTime()
+  local age = now - (core.lastUpdate or 0)
   local stale = age > core.staleAfter
+  local teleLabel = core.teleLabel
+  local teleRaw = core.teleRaw
+  local teleStale
+  if core.teleFieldId and teleLabel then
+    teleStale = (now - (core.teleLastUpdate or 0)) > core.staleAfter
+  end
   return {
     state = stale and "stale" or "ready",
     label = core.targetLabel,
     raw = core.targetRaw,
     module = core.deviceName,
     fieldName = core.targetFieldName or "Packet Rate",
-    stale = stale
+    stale = stale,
+    teleLabel = teleLabel,
+    teleRaw = teleRaw,
+    teleFieldName = core.teleFieldName,
+    teleStale = teleLabel and teleStale or nil
   }
 end
 
@@ -449,6 +539,9 @@ local function updateOptions(widget, options)
   if widget.options.ShowName == nil then
     widget.options.ShowName = 1
   end
+  if widget.options.ShowTelem == nil then
+    widget.options.ShowTelem = 1
+  end
 end
 
 local function create(zone, options)
@@ -476,29 +569,36 @@ local function refresh(widget)
 
   drawMain(widget.zone, info.label or "Rate ?", info.state == "stale")
 
-  local showName = widget.options.ShowName ~= 0
-  if showName then
-    local subline
+  local subParts = {}
+  if widget.options.ShowName ~= 0 then
     if info.module and info.module ~= "" then
-      subline = info.module
+      subParts[#subParts + 1] = info.module
     end
     if info.raw and info.raw ~= "" and info.raw ~= info.label then
-      if subline then
-        subline = subline .. " | " .. info.raw
-      else
-        subline = info.raw
-      end
+      subParts[#subParts + 1] = info.raw
     end
-    if subline then
-      drawCentered(widget.zone, widget.zone.y + widget.zone.h - 10, subline, SMLSIZE)
+  end
+  if widget.options.ShowTelem ~= 0 and info.teleLabel then
+    local teleText = info.teleLabel
+    if info.teleRaw and info.teleRaw ~= info.teleLabel then
+      teleText = teleText .. " (" .. info.teleRaw .. ")"
     end
+    if info.teleStale then
+      teleText = teleText .. " *"
+    end
+    subParts[#subParts + 1] = "Telem " .. teleText
+  end
+  if #subParts > 0 then
+    local subline = table.concat(subParts, " | ")
+    drawCentered(widget.zone, widget.zone.y + widget.zone.h - 10, subline, SMLSIZE)
   end
 end
 
 return {
   name = "ELRS Packet Rate",
   options = {
-    { "ShowName", BOOL, 1 }
+    { "ShowName", BOOL, 1 },
+    { "ShowTelem", BOOL, 1 }
   },
   create = create,
   update = update,
