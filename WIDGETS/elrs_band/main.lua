@@ -520,6 +520,15 @@ local function drawMain(zone, text, stale)
   drawCentered(zone, y, text, attr)
 end
 
+local function bottomTextY(zone)
+  local margin = 1
+  local y = zone.y + zone.h - fontHeight(SMLSIZE) - margin
+  if y < zone.y then
+    return zone.y
+  end
+  return y
+end
+
 local function drawStatus(zone, state, moduleName, showName)
   local messageMap = {
     no_crsf = "CRSF unavailable",
@@ -530,7 +539,7 @@ local function drawStatus(zone, state, moduleName, showName)
   local mainText = messageMap[state] or "Unknown"
   drawMain(zone, mainText, false)
   if showName and moduleName and moduleName ~= "" then
-    drawCentered(zone, zone.y + zone.h - 10, moduleName, SMLSIZE)
+    drawCentered(zone, bottomTextY(zone), moduleName, SMLSIZE)
   end
 end
 
@@ -590,7 +599,7 @@ local function refresh(widget)
   end
   if #subParts > 0 then
     local subline = table.concat(subParts, " | ")
-    drawCentered(widget.zone, widget.zone.y + widget.zone.h - 10, subline, SMLSIZE)
+    drawCentered(widget.zone, bottomTextY(widget.zone), subline, SMLSIZE)
   end
 end
 
